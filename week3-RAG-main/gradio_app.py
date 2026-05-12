@@ -1,0 +1,196 @@
+from __future__ import annotations
+
+import pandas as pd
+import gradio as gr
+
+from rag_core import RAGPipeline, parse_expected_ids
+
+
+# Chargement unique du pipeline RAG
+pipeline = RAGPipeline()
+
+
+def references_table(documents) -> pd.DataFrame:
+    """Convertit les documents récupérés en tableau lisible dans Gradio."""
+    return pd.DataFrame(
+        [
+            {
+                "article_id": doc.article_id,
+                "score": round(doc.score, 4),
+                "mots_cles": doc.keywords,
+                "source": doc.source,
+                "extrait": doc.text[:280] + ("..." if len(doc.text) > 280 else ""),
+            }
+            for doc in documents
+        ]
+    )
+
+
+def comparison_table(comparison_rows) -> pd.DataFrame:
+    """Tableau de comparaison des 3 LLMs / stratégies de génération."""
+    return pd.DataFrame(comparison_rows)
+
+
+def format_references(documents) -> str:
+    """Affichage détaillé des références utilisées."""
+    if not documents:
+        return "Aucune référence trouvée."
+
+    blocks = []
+    for doc in documents:
+        blocks.append(
+            f"### {doc.title} — score {doc.score:.3f}\n"
+            f"**Source :** {doc.source or 'non précisée'}  \n"
+            f"**Mots-clés :** {doc.keywords or 'non précisés'}\n\n"
+            f"> {doc.text}\n"
+        )
+    return "\n---\n".join(blocks)
+
+
+def run_rag(
+    question: str,
+    top_k: int,
+    threshold: float,
+    expected_raw: str,
+    use_real_models: bool,
+    show_prompt: bool,
+):
+    """Fonction appelée par l'interface Gradio."""
+    question = (question or "").strip()
+    if not question:
+        empty_df = pd.DataFrame()
+        return (
+            "Veuillez saisir une question.",
+            "",
+            empty_df,
+            empty_df,
+            "",
+            "",
+            "",
+            "",
+        )
+
+    pipeline.domain_threshold = float(threshold)
+    expected_ids = parse_expected_ids(expected_raw or "")
+
+    result = pipeline.answer(
+        question,
+        k=int(top_k),
+        expected_ids=expected_ids,
+        use_real_models=bool(use_real_models),
+    )
+
+    documents = result["documents"]
+    evaluation = result["evaluation"]
+
+    status = "🔴 Hors domaine" if result["out_of_domain"] else "🟢 Dans le domaine"
+    domain_message = f"## {status}\n\n{result['domain_reason']}"
+
+    metrics = (
+        f"### Évaluation\n"
+        f"- **Precision :** {evaluation['precision']}\n"
+        f"- **Recall :** {evaluation['recall']}\n"
+        f"- **Mode :** {evaluation['mode']}\n"
+        f"- **Articles retrouvés :** {', '.join(evaluation['retrieved_ids']) or 'aucun'}\n"
+        f"- **Articles pertinents :** {', '.join(evaluation['relevant_ids']) or 'aucun'}"
+    )
+
+    prompt_output = result["prompt"] if show_prompt else "Prompt masqué. Cochez l’option pour l’afficher."
+
+    return (
+        domain_message,
+        result["answer"],
+        references_table(documents),
+        comparison_table(result["comparison"]),
+        metrics,
+        format_references(documents),
+        prompt_output,
+        f"Corpus chargé : {len(pipeline.df)} articles.",
+    )
+
+
+with gr.Blocks(title="RAG juridique - Code de la route marocain", theme=gr.themes.Soft()) as demo:
+    gr.Markdown(
+        """
+        # Assistant RAG juridique — Code de la route marocain
+
+        Cette interface permet d’interroger le corpus juridique, de récupérer les articles pertinents,
+        de générer une réponse contextualisée, de comparer 3 modèles/stratégies et d’afficher les références utilisées.
+        """
+    )
+
+    with gr.Row():
+        with gr.Column(scale=2):
+            question = gr.Textbox(
+                label="Question utilisateur",
+                value="Quelles sont les règles concernant le permis de conduire ?",
+                lines=4,
+                placeholder="Exemple : Quelle est la sanction pour un excès de vitesse ?",
+            )
+
+            run_button = gr.Button("Interroger le système", variant="primary")
+
+        with gr.Column(scale=1):
+            top_k = gr.Slider(
+                label="Nombre de documents récupérés",
+                minimum=1,
+                maximum=max(1, len(pipeline.df)),
+                value=min(3, len(pipeline.df)),
+                step=1,
+            )
+            threshold = gr.Slider(
+                label="Seuil de détection hors domaine",
+                minimum=0.0,
+                maximum=0.5,
+                value=0.08,
+                step=0.01,
+            )
+            expected_raw = gr.Textbox(
+                label="Articles attendus pour l’évaluation",
+                placeholder="Exemple : 1, 2, 15",
+            )
+            use_real_models = gr.Checkbox(
+                label="Comparer Qwen, GPT et Llama réels",
+                value=False,
+            )
+            show_prompt = gr.Checkbox(
+                label="Afficher le prompt injecté",
+                value=False,
+            )
+            corpus_info = gr.Markdown(f"Corpus chargé : {len(pipeline.df)} articles.")
+
+    with gr.Tab("Réponse"):
+        domain_output = gr.Markdown()
+        answer_output = gr.Textbox(label="Réponse contextualisée", lines=8)
+
+    with gr.Tab("Documents pertinents"):
+        refs_df = gr.Dataframe(label="Documents récupérés", wrap=True)
+        refs_details = gr.Markdown(label="Références détaillées")
+
+    with gr.Tab("Comparaison des LLMs"):
+        comparison_df = gr.Dataframe(label="Comparaison de 3 LLMs / stratégies", wrap=True)
+
+    with gr.Tab("Évaluation"):
+        metrics_output = gr.Markdown()
+
+    with gr.Tab("Prompt RAG"):
+        prompt_output = gr.Textbox(label="Prompt injecté", lines=15)
+
+    run_button.click(
+        fn=run_rag,
+        inputs=[question, top_k, threshold, expected_raw, use_real_models, show_prompt],
+        outputs=[
+            domain_output,
+            answer_output,
+            refs_df,
+            comparison_df,
+            metrics_output,
+            refs_details,
+            prompt_output,
+            corpus_info,
+        ],
+    )
+
+
+if __name__ == "__main__":
+    demo.launch()
