@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import gradio as gr
 
+from ollama_models import DEFAULT_MODEL, LOCAL_MODELS, check_ollama_server
 from rag_core import RAGPipeline, parse_expected_ids
 
 
@@ -27,7 +28,7 @@ def references_table(documents) -> pd.DataFrame:
 
 
 def comparison_table(comparison_rows) -> pd.DataFrame:
-    """Tableau de comparaison des 3 LLMs / stratégies de génération."""
+    """Tableau de comparaison des 3 modèles Ollama."""
     return pd.DataFrame(comparison_rows)
 
 
@@ -52,7 +53,8 @@ def run_rag(
     top_k: int,
     threshold: float,
     expected_raw: str,
-    use_real_models: bool,
+    use_ollama: bool,
+    selected_model_display: str,
     show_prompt: bool,
 ):
     """Fonction appelée par l'interface Gradio."""
@@ -72,18 +74,20 @@ def run_rag(
 
     pipeline.domain_threshold = float(threshold)
     expected_ids = parse_expected_ids(expected_raw or "")
+    selected_model = LOCAL_MODELS.get(selected_model_display, DEFAULT_MODEL)
 
     result = pipeline.answer(
         question,
         k=int(top_k),
         expected_ids=expected_ids,
-        use_real_models=bool(use_real_models),
+        use_ollama=bool(use_ollama),
+        selected_model=selected_model,
     )
 
     documents = result["documents"]
     evaluation = result["evaluation"]
 
-    status = "🔴 Hors domaine" if result["out_of_domain"] else "🟢 Dans le domaine"
+    status = "🔴 Hors domaine / confiance faible" if result["out_of_domain"] else "🟢 Dans le domaine"
     domain_message = f"## {status}\n\n{result['domain_reason']}"
 
     metrics = (
@@ -97,6 +101,9 @@ def run_rag(
 
     prompt_output = result["prompt"] if show_prompt else "Prompt masqué. Cochez l’option pour l’afficher."
 
+    ok, ollama_status = check_ollama_server()
+    corpus_message = f"Corpus chargé : {len(pipeline.df)} articles.\n\nStatut Ollama : {ollama_status}"
+
     return (
         domain_message,
         result["answer"],
@@ -105,7 +112,7 @@ def run_rag(
         metrics,
         format_references(documents),
         prompt_output,
-        f"Corpus chargé : {len(pipeline.df)} articles.",
+        corpus_message,
     )
 
 
@@ -114,8 +121,23 @@ with gr.Blocks(title="RAG juridique - Code de la route marocain", theme=gr.theme
         """
         # Assistant RAG juridique — Code de la route marocain
 
-        Cette interface permet d’interroger le corpus juridique, de récupérer les articles pertinents,
-        de générer une réponse contextualisée, de comparer 3 modèles/stratégies et d’afficher les références utilisées.
+        Cette version utilise une interface **Gradio** et des modèles **Ollama locaux**,
+        sans API OpenAI. Elle permet d’interroger le corpus juridique, de récupérer les articles pertinents,
+        de générer une réponse contextualisée, de comparer 3 modèles locaux et d’afficher les références utilisées.
+        """
+    )
+
+    ok, ollama_status = check_ollama_server()
+    gr.Markdown(
+        f"""
+        **Modèles à installer sur Windows PowerShell :**
+        ```powershell
+        ollama pull qwen2.5:3b
+        ollama pull llama3.2:3b
+        ollama pull mistral:7b
+        ```
+
+        **Statut Ollama :** {ollama_status}
         """
     )
 
@@ -139,19 +161,24 @@ with gr.Blocks(title="RAG juridique - Code de la route marocain", theme=gr.theme
                 step=1,
             )
             threshold = gr.Slider(
-                label="Seuil de détection hors domaine",
+                label="Seuil de confiance minimal",
                 minimum=0.0,
                 maximum=0.5,
-                value=0.08,
+                value=0.20,
                 step=0.01,
             )
             expected_raw = gr.Textbox(
                 label="Articles attendus pour l’évaluation",
                 placeholder="Exemple : 1, 2, 15",
             )
-            use_real_models = gr.Checkbox(
-                label="Comparer Qwen, GPT et Llama réels",
-                value=False,
+            use_ollama = gr.Checkbox(
+                label="Utiliser les modèles Ollama locaux",
+                value=True,
+            )
+            selected_model_display = gr.Dropdown(
+                label="Modèle principal pour la réponse",
+                choices=list(LOCAL_MODELS.keys()),
+                value="Qwen 2.5 3B",
             )
             show_prompt = gr.Checkbox(
                 label="Afficher le prompt injecté",
@@ -168,7 +195,7 @@ with gr.Blocks(title="RAG juridique - Code de la route marocain", theme=gr.theme
         refs_details = gr.Markdown(label="Références détaillées")
 
     with gr.Tab("Comparaison des LLMs"):
-        comparison_df = gr.Dataframe(label="Comparaison de 3 LLMs / stratégies", wrap=True)
+        comparison_df = gr.Dataframe(label="Comparaison de 3 modèles Ollama", wrap=True)
 
     with gr.Tab("Évaluation"):
         metrics_output = gr.Markdown()
@@ -178,7 +205,7 @@ with gr.Blocks(title="RAG juridique - Code de la route marocain", theme=gr.theme
 
     run_button.click(
         fn=run_rag,
-        inputs=[question, top_k, threshold, expected_raw, use_real_models, show_prompt],
+        inputs=[question, top_k, threshold, expected_raw, use_ollama, selected_model_display, show_prompt],
         outputs=[
             domain_output,
             answer_output,

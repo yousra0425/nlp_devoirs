@@ -3,5 +3,3 @@ numpy
 scikit-learn
 gradio
 requests
-transformers
-torch
